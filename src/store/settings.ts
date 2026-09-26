@@ -46,7 +46,22 @@ const DEFAULTS: AppSettings = {
   snapToGrid: false,
   colorTheme: 'readability',
   canvasGuideDismissed: false,
-  customStatuses: [],
+  // LOCAL DELTA — not upstream, and deliberately never part of PR #218.
+  //
+  // Upstream ships `[]` here: c4hero should not put one estate's vocabulary into
+  // everyone's dropdown. But THIS build serves John's estate, where these three
+  // are the JRVIS punt taxonomy (~/____OrganizeDigitalLife/schema/beyond-mvp.md)
+  // and are expected on the canvas without anyone configuring a browser first.
+  //
+  // Why a build default rather than a settings entry: `customStatuses` persists to
+  // localStorage, so a settings entry is per-browser-PROFILE. It is lost on a new
+  // Chrome profile, on cleared site data, on a second Mac — and it is lost
+  // SILENTLY, because the dropdown simply shows four values again with no error.
+  // A default travels with the build, so it holds everywhere this build is served.
+  //
+  // Editing Custom statuses in the UI still overrides this completely, and an
+  // explicitly emptied list stays empty.
+  customStatuses: ['Decisions deferred', 'Beyond MVP', 'Someday / maybe'],
 }
 
 const STORAGE_KEY = 'c4hero.json'
