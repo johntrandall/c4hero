@@ -152,8 +152,18 @@ describe('useSettingsStore', () => {
     expect(freshStore.getState().customStatuses).toEqual(['Beyond MVP', 'Someday / maybe'])
   })
 
-  it('defaults customStatuses to empty when persisted storage has the wrong shape', async () => {
+  it('falls back to the build defaults when persisted customStatuses has the wrong shape', async () => {
+    // LOCAL DELTA: upstream's default is `[]`, so upstream asserts `[]` here.
+    // This build seeds the estate's three punt statuses (see settings.ts), and
+    // the behaviour under test is unchanged — a wrong-shaped persisted value is
+    // discarded in favour of the defaults, whatever those defaults are.
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ customStatuses: 'Beyond MVP' }))
+    const freshStore = await importFreshSettingsStore()
+    expect(freshStore.getState().customStatuses).toEqual(['Decisions deferred', 'Beyond MVP', 'Someday / maybe'])
+  })
+
+  it('a user who explicitly empties the list keeps it empty — the default does not creep back', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ customStatuses: [] }))
     const freshStore = await importFreshSettingsStore()
     expect(freshStore.getState().customStatuses).toEqual([])
   })
