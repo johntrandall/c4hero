@@ -152,7 +152,17 @@ export async function readCurrentFile(): Promise<WatchedSnapshot | null> {
  */
 export async function fileAlreadyHas(handle: FileSystemFileHandle, content: string): Promise<boolean> {
   try {
-    return (await readTextFileWithLimit(await handle.getFile(), 'Existing file')) === content
+    const existing = await handle.getFile()
+    // Cheap reject before any decode: text of a different byte length cannot be
+    // the same text. Most real comparisons end here.
+    //
+    // Encode rather than using `content.length`. That counts UTF-16 code units,
+    // not bytes, so any workspace containing a non-ASCII character — an em
+    // dash, a name with an accent — would never match its own file, and the
+    // skip would silently never engage for exactly the documents that have
+    // them. saveRoundTrip.test.ts guards this; do not "simplify" it away.
+    if (existing.size !== new TextEncoder().encode(content).byteLength) return false
+    return (await readTextFileWithLimit(existing, 'Existing file')) === content
   } catch {
     return false
   }

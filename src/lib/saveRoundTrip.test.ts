@@ -247,3 +247,33 @@ describe('the comparison is size-capped like every other read', () => {
     expect(await fileAlreadyHas(handle, 'something else')).toBe(false)
   })
 })
+
+describe('the byte-length short-circuit does not break on non-ASCII', () => {
+  // The cheap reject compares file.size (BYTES) against the encoded length of
+  // the candidate text. Using content.length instead would compare UTF-16 code
+  // units, so any workspace containing an em dash or an accented name would
+  // never match its own file and the skip would silently never engage — for
+  // exactly the documents most likely to have them. These tests exist to fail
+  // loudly if someone "simplifies" the encode away.
+  const withEmDashes = 'workspace "Spine — the one table" { model { s = softwareSystem "Café — naïve" "Rødgrød, 日本語, emoji 🙂" } }'
+
+  it('skips a rewrite of text whose bytes outnumber its UTF-16 units', async () => {
+    const file = new File([withEmDashes], 'w.dsl', { type: 'text/plain' })
+    expect(file.size).toBeGreaterThan(withEmDashes.length) // multi-byte, so the naive check would be wrong
+    const handle = { getFile: async () => file } as unknown as FileSystemFileHandle
+    expect(await fileAlreadyHas(handle, withEmDashes)).toBe(true)
+  })
+
+  it('still reports a difference when the text differs', async () => {
+    const file = new File([withEmDashes], 'w.dsl', { type: 'text/plain' })
+    const handle = { getFile: async () => file } as unknown as FileSystemFileHandle
+    expect(await fileAlreadyHas(handle, withEmDashes.replace('naïve', 'naive'))).toBe(false)
+  })
+
+  it('round-trips non-ASCII through the real folder writer', async () => {
+    expect(await writeDSLFile('u.dsl', withEmDashes)).toBe(true)
+    expect(rig.opened['u.dsl']).toBe(1)
+    expect(await writeDSLFile('u.dsl', withEmDashes)).toBe(true)
+    expect(rig.opened['u.dsl']).toBe(1) // skipped, not rewritten
+  })
+})
