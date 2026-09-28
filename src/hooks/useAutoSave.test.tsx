@@ -67,6 +67,34 @@ describe('useAutoSave', () => {
     expect(useWorkspaceStore.getState().lastSavedUndoLength).toBe(useWorkspaceStore.getState().undoStack.length)
   })
 
+  it('saves a node DRAG, which deliberately pushes no undo entry (view-slice.ts:158)', async () => {
+    // The whole point of the app is dragging boxes, and updateNodePosition
+    // carries the comment "Don't push undo for every drag position — too
+    // noisy". So a drag moves the model without moving undoStack.length, and
+    // any dirtiness test built on the undo stack alone will silently refuse to
+    // save the one edit users make most.
+    vi.mocked(isWorkspaceLinked).mockReturnValue(true)
+    render(<Harness />)
+    act(() => {
+      useWorkspaceStore.getState().loadWorkspace(parseDSL(
+        'workspace "W" { model { u = person "U" s = softwareSystem "S" u -> s "uses" } views { systemContext s "Ctx" { include * } } }',
+      ).workspace)
+    })
+    act(() => { useWorkspaceStore.getState().setActiveWorkspaceFilename('w.dsl') })
+    act(() => { useWorkspaceStore.getState().setActiveView('Ctx') })
+    await settle()
+    vi.mocked(writeLinkedWorkspace).mockClear()
+
+    const view = useWorkspaceStore.getState().workspace!.views.systemContextViews[0]
+    const targetId = view.elements[0].id
+    const undoBefore = useWorkspaceStore.getState().undoStack.length
+    act(() => { useWorkspaceStore.getState().updateNodePosition(targetId, 1234, 5678) })
+    expect(useWorkspaceStore.getState().undoStack.length).toBe(undoBefore) // drag pushes no undo
+    await settle()
+
+    expect(writeLinkedWorkspace).toHaveBeenCalled()
+  })
+
   it('keeps the workspace dirty when the linked write fails', async () => {
     vi.mocked(isWorkspaceLinked).mockReturnValue(true)
     vi.mocked(writeLinkedWorkspace).mockResolvedValue(false)
