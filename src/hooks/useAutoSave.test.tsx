@@ -39,6 +39,22 @@ describe('useAutoSave', () => {
     expect(useWorkspaceStore.getState().lastSavedUndoLength).toBe(0)
   })
 
+  it('does not write a workspace that was merely opened (TEA: opening is not editing)', async () => {
+    // Autosave's effect is keyed on the workspace OBJECT, and loading one is a
+    // change of that object, so the effect fires on open exactly as it does on
+    // edit. Without a dirty gate that first fire serialises the parsed model
+    // straight back over the file the user just opened, which makes a second
+    // c4hero on the same folder a second WRITER and normalises away anything
+    // the serializer does not round-trip. Load resets undoStack to [] and
+    // lastSavedUndoLength to 0, so "nothing was edited" is expressible.
+    vi.mocked(isWorkspaceLinked).mockReturnValue(true)
+    render(<Harness />)
+    act(() => { useWorkspaceStore.getState().loadWorkspace(parseDSL('workspace "W" { model { u = person "U" } }').workspace) })
+    act(() => { useWorkspaceStore.getState().setActiveWorkspaceFilename('w.dsl') })
+    await settle()
+    expect(writeLinkedWorkspace).not.toHaveBeenCalled()
+  })
+
   it('writes a linked workspace and records the saved undo length only once the write succeeds', async () => {
     vi.mocked(isWorkspaceLinked).mockReturnValue(true)
     render(<Harness />)
