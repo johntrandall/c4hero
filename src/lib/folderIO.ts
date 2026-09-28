@@ -151,6 +151,26 @@ export async function readDSLFileAt(relPath: string): Promise<string | null> {
   return readTextFileWithLimit(file, 'Included DSL file')
 }
 
+/**
+ * True when the file already holds exactly this text.
+ *
+ * Writing bytes that are already on disk is never necessary and is not free.
+ * It bumps mtime, wakes every watcher on the folder, and — because the whole
+ * workspace is serialised on any change to it — turns "open a diagram" into an
+ * edit of the file that diagram came from. Comparing first costs one read.
+ *
+ * Any failure reading falls through to writing: never skip a write because a
+ * check went wrong.
+ */
+async function fileAlreadyHas(handle: FileSystemFileHandle, content: string): Promise<boolean> {
+  try {
+    const existing = await handle.getFile()
+    return (await existing.text()) === content
+  } catch {
+    return false
+  }
+}
+
 /** Write a text file at a path relative to the open folder (include
  *  write-back). Never creates the file: an included file that vanished is
  *  not silently recreated. */
@@ -159,6 +179,7 @@ export async function writeDSLFileAt(relPath: string, content: string): Promise<
     const handle = await resolveFileHandle(relPath, false)
     if (!handle) return false
     recordSelfDslWrite(content)
+    if (await fileAlreadyHas(handle, content)) return true
     const writable = await handle.createWritable()
     await writable.write(content)
     await writable.close()
@@ -305,6 +326,7 @@ export async function writeDSLFile(filename: string, content: string): Promise<b
   try {
     recordSelfDslWrite(content)
     const fileHandle = await currentDirHandle.getFileHandle(filename, { create: true })
+    if (await fileAlreadyHas(fileHandle, content)) return true
     const writable = await fileHandle.createWritable()
     await writable.write(content)
     await writable.close()
@@ -322,6 +344,7 @@ export async function writeSidecarFile(dslFilename: string, json: string): Promi
     const filename = sidecarName(dslFilename)
     recordSelfSidecarWrite(json)
     const fileHandle = await currentDirHandle.getFileHandle(filename, { create: true })
+    if (await fileAlreadyHas(fileHandle, json)) return true
     const writable = await fileHandle.createWritable()
     await writable.write(json)
     await writable.close()
@@ -366,6 +389,7 @@ export async function writeTextFileAt(relPath: string, content: string): Promise
   try {
     const handle = await resolveFileHandle(relPath, true)
     if (!handle) return false
+    if (await fileAlreadyHas(handle, content)) return true
     const writable = await handle.createWritable()
     await writable.write(content)
     await writable.close()
