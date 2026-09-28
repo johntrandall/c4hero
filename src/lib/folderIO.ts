@@ -151,26 +151,6 @@ export async function readDSLFileAt(relPath: string): Promise<string | null> {
   return readTextFileWithLimit(file, 'Included DSL file')
 }
 
-/**
- * True when the file already holds exactly this text.
- *
- * Writing bytes that are already on disk is never necessary and is not free.
- * It bumps mtime, wakes every watcher on the folder, and — because the whole
- * workspace is serialised on any change to it — turns "open a diagram" into an
- * edit of the file that diagram came from. Comparing first costs one read.
- *
- * Any failure reading falls through to writing: never skip a write because a
- * check went wrong.
- */
-async function fileAlreadyHas(handle: FileSystemFileHandle, content: string): Promise<boolean> {
-  try {
-    const existing = await handle.getFile()
-    return (await existing.text()) === content
-  } catch {
-    return false
-  }
-}
-
 /** Write a text file at a path relative to the open folder (include
  *  write-back). Never creates the file: an included file that vanished is
  *  not silently recreated. */
