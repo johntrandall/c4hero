@@ -19,9 +19,12 @@
  * The first property is why the byte comparison exists; the second is why it
  * has to live at the file level rather than in a dirtiness flag.
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { setDirHandle, writeDSLFile, writeSidecarFile } from './folderIO'
+import { fileAlreadyHas, openDSLFile, writeToCurrentHandle } from './fileIO'
 import { writeLinkedWorkspace } from './workspaceSave'
+import { isSelfWrite, resetSaveCoordinator } from './saveCoordinator'
+import { hashContent } from './fileWatch'
 import { parseDSL } from './dsl'
 import type { Workspace } from '@/types/model'
 
@@ -79,6 +82,7 @@ function moveFirstNode(workspace: Workspace, x: number, y: number): void {
 let rig: ReturnType<typeof makeCountingDirHandle>
 
 beforeEach(async () => {
+  resetSaveCoordinator()
   rig = makeCountingDirHandle()
   await setDirHandle(rig.dir)
 })
@@ -157,5 +161,89 @@ describe('the writers themselves', () => {
     expect(rig.opened['a.c4hero.json']).toBe(1)
     expect(await writeSidecarFile('a.dsl', json)).toBe(true)
     expect(rig.opened['a.c4hero.json']).toBe(1)
+  })
+})
+
+describe('the disk watcher still recognises a save that skipped one of its two files', () => {
+  // The DSL and the sidecar are written separately, so a save can change one
+  // and skip the other. The watcher then observes a MIXED on-disk state, and
+  // recognises it as c4hero's own only if BOTH halves are accounted for. That
+  // is why the skipped write still records its hash: drop the record and the
+  // skip manufactures the very conflict prompt this whole change exists to
+  // avoid. Identified in review of PR #222 as the one regression the other
+  // tests here would not catch.
+  it('records the sidecar hash even when the sidecar write was skipped', async () => {
+    const workspace = parseDSL(DSL).workspace
+    await writeLinkedWorkspace(workspace, 'shop.dsl')
+
+    // Change only the model, so the sidecar serialises identically and is skipped.
+    workspace.model.softwareSystems[0].description = 'Changed, so only the DSL moves'
+    const sidecarWritesBefore = rig.opened['shop.c4hero.json'] ?? 0
+    await writeLinkedWorkspace(workspace, 'shop.dsl')
+    expect(rig.opened['shop.c4hero.json']).toBe(sidecarWritesBefore) // skipped, as designed
+
+    const onDisk = {
+      dsl: hashContent(rig.content['shop.dsl']),
+      sidecar: hashContent(rig.content['shop.c4hero.json']),
+    }
+    // A baseline that has moved on, so neither half can be excused as "unchanged
+    // since the watcher last looked". Only the recorded hashes can vouch for it.
+    const staleBaseline = { dsl: hashContent('something else'), sidecar: hashContent('something else') }
+
+    expect(isSelfWrite(onDisk, staleBaseline)).toBe(true)
+  })
+})
+
+describe('single-file mode, the other half of the patch', () => {
+  /** Install a file handle the way the app does, through the open picker. */
+  async function openSingleFile(initial: string) {
+    const state = { content: initial, opened: 0 }
+    const handle = {
+      kind: 'file' as const,
+      name: 'single.dsl',
+      getFile: async () => new File([state.content], 'single.dsl', { type: 'text/plain' }),
+      createWritable: async () => {
+        state.opened++
+        let buf = ''
+        return { write: (d: string) => { buf += d }, close: async () => { state.content = buf } }
+      },
+    }
+    vi.stubGlobal('showOpenFilePicker', vi.fn(async () => [handle]))
+    await openDSLFile()
+    return state
+  }
+
+  it('skips the write when the open file already holds the text', async () => {
+    const state = await openSingleFile('workspace "S" {}')
+    expect(await writeToCurrentHandle('workspace "S" {}')).toBe(true)
+    expect(state.opened).toBe(0)
+  })
+
+  it('writes when the open file differs', async () => {
+    const state = await openSingleFile('workspace "S" {}')
+    expect(await writeToCurrentHandle('workspace "T" {}')).toBe(true)
+    expect(state.opened).toBe(1)
+    expect(state.content).toBe('workspace "T" {}')
+  })
+})
+
+describe('the comparison is size-capped like every other read', () => {
+  // Pulling an arbitrarily large file into memory just to decide whether to
+  // skip a write would be a worse bug than the one being fixed. Past the cap
+  // the read throws, and the throw means WRITE — never skip on a failed check.
+  it('reports "not already has" for a file past the limit, so the write proceeds', async () => {
+    const tooBig = {
+      size: 20 * 1024 * 1024,
+      text: async () => 'never reached',
+    } as unknown as File
+    const handle = { getFile: async () => tooBig } as unknown as FileSystemFileHandle
+    expect(await fileAlreadyHas(handle, 'never reached')).toBe(false)
+  })
+
+  it('still compares normally under the limit', async () => {
+    const ok = new File(['exactly this'], 'w.dsl', { type: 'text/plain' })
+    const handle = { getFile: async () => ok } as unknown as FileSystemFileHandle
+    expect(await fileAlreadyHas(handle, 'exactly this')).toBe(true)
+    expect(await fileAlreadyHas(handle, 'something else')).toBe(false)
   })
 })

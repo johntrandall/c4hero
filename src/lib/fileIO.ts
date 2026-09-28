@@ -4,7 +4,6 @@ import { createLogger } from '@/lib/logger'
 import { isFiniteNumber, isNonEmptyString, isRecord, isStringArray, isStringRecord } from '@/lib/guards'
 import { sidecarName } from '@/lib/sidecar'
 import { safeSuggestedDslName } from '@/lib/filenames'
-import { isElementStatusValue } from '@/lib/elementStatus'
 import { readJSON, writeJSON, writeString, removeKey } from '@/lib/safeStorage'
 import { recordSelfDslWrite, recordSelfSidecarWrite } from '@/lib/saveCoordinator'
 import type { WatchedSnapshot } from '@/lib/fileWatch'
@@ -143,13 +142,17 @@ export async function readCurrentFile(): Promise<WatchedSnapshot | null> {
  * workspace is serialised on any change to it — turns "open a diagram" into an
  * edit of the file that diagram came from. Comparing first costs one read.
  *
- * Any failure reading falls through to writing: never skip a write because a
- * check went wrong.
+ * Size-capped like every other read in this module: a file past the limit
+ * throws rather than being pulled into memory, and the throw lands in the
+ * catch below.
+ *
+ * Any failure reading falls through to writing. Never skip a write because a
+ * check went wrong — a redundant write costs an mtime, a wrongly skipped one
+ * costs the edit.
  */
-async function fileAlreadyHas(handle: FileSystemFileHandle, content: string): Promise<boolean> {
+export async function fileAlreadyHas(handle: FileSystemFileHandle, content: string): Promise<boolean> {
   try {
-    const existing = await handle.getFile()
-    return (await existing.text()) === content
+    return (await readTextFileWithLimit(await handle.getFile(), 'Existing file')) === content
   } catch {
     return false
   }
@@ -338,7 +341,7 @@ function isBaseElementShape(value: unknown): value is Record<string, unknown> {
   if (!isStringRecord(value.properties)) return false
   if ('description' in value && value.description !== undefined && typeof value.description !== 'string') return false
   if ('url' in value && value.url !== undefined && typeof value.url !== 'string') return false
-  if ('status' in value && value.status !== undefined && !isElementStatusValue(value.status)) return false
+  if ('status' in value && value.status !== undefined && !['Live', 'Planned', 'Deprecated', 'Removed'].includes(String(value.status))) return false
   if ('owner' in value && value.owner !== undefined && typeof value.owner !== 'string') return false
   return true
 }

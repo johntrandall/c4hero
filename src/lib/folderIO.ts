@@ -1,6 +1,6 @@
 import { sidecarName } from '@/lib/sidecar'
 import { createLogger } from '@/lib/logger'
-import { readTextFileWithLimit } from '@/lib/fileIO'
+import { fileAlreadyHas, readTextFileWithLimit } from '@/lib/fileIO'
 import { isRecord } from '@/lib/guards'
 import { recordSelfDslWrite, recordSelfSidecarWrite } from '@/lib/saveCoordinator'
 import type { WatchedSnapshot } from '@/lib/fileWatch'
