@@ -51,24 +51,6 @@ export function useAutoSave() {
         // workspace is ever marked saved: an unlinked one must stay dirty so
         // the disk watcher still treats local edits as unsaved.
         if (!isWorkspaceLinked(state.activeWorkspaceFilename)) return
-
-        // Opening a workspace is not editing it. This effect is keyed on the
-        // workspace object, and loading one is a change of that object, so it
-        // fires on open exactly as it fires on edit. Without this gate that
-        // first fire serialises the freshly parsed model straight back over the
-        // file the user just opened — which silently normalises away anything
-        // the serializer does not round-trip, and makes a second c4hero on the
-        // same folder a second WRITER rather than a reader.
-        //
-        // Load resets undoStack to [] and lastSavedUndoLength to 0 (see
-        // lifecycle-slice), so this is false immediately after a load and true
-        // as soon as anything is actually edited. It is the same condition the
-        // disk watcher already uses as hasUnsavedLocalEdits(). A successful
-        // write below moves lastSavedUndoLength, so a settled workspace stays
-        // quiet. localStorage crash-recovery above is deliberately NOT gated:
-        // it is in-browser only and costs nobody anything.
-        if (state.undoStack.length === state.lastSavedUndoLength && !state.codePaneDirty) return
-
         const undoLength = state.undoStack.length
         writeLinkedWorkspace(state.workspace, state.activeWorkspaceFilename).then(
           (ok) => { if (ok) useWorkspaceStore.getState().setLastSavedUndoLength(undoLength) },
