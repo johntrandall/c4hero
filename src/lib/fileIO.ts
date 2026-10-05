@@ -4,6 +4,8 @@ import { createLogger } from '@/lib/logger'
 import { isFiniteNumber, isNonEmptyString, isRecord, isStringArray, isStringRecord } from '@/lib/guards'
 import { sidecarName } from '@/lib/sidecar'
 import { safeSuggestedDslName } from '@/lib/filenames'
+import { isElementStatusValue, normalizeElementStatus } from '@/lib/elementStatus'
+import { forEachElementHelper } from '@/store/workspace-helpers'
 import { readJSON, writeJSON, writeString, removeKey } from '@/lib/safeStorage'
 import { recordSelfDslWrite, recordSelfSidecarWrite } from '@/lib/saveCoordinator'
 import type { WatchedSnapshot } from '@/lib/fileWatch'
@@ -135,12 +137,15 @@ export async function readCurrentFile(): Promise<WatchedSnapshot | null> {
 }
 
 /**
- * True when the file already holds exactly this text.
+ * True when the file already holds exactly the UTF-8 bytes of this text.
  *
  * Writing bytes that are already on disk is never necessary and is not free.
  * It bumps mtime, wakes every watcher on the folder, and — because the whole
  * workspace is serialised on any change to it — turns "open a diagram" into an
  * edit of the file that diagram came from. Comparing first costs one read.
+ *
+ * Bytes, not decoded text: decoding maps malformed UTF-8 to U+FFFD, so a
+ * decoded comparison can call two different files equal.
  *
  * Size-capped like every other read in this module: a file past the limit
  * throws rather than being pulled into memory, and the throw lands in the
@@ -153,19 +158,38 @@ export async function readCurrentFile(): Promise<WatchedSnapshot | null> {
 export async function fileAlreadyHas(handle: FileSystemFileHandle, content: string): Promise<boolean> {
   try {
     const existing = await handle.getFile()
-    // Cheap reject before any decode: text of a different byte length cannot be
-    // the same text. Most real comparisons end here.
-    //
-    // Encode rather than using `content.length`. That counts UTF-16 code units,
-    // not bytes, so any workspace containing a non-ASCII character — an em
-    // dash, a name with an accent — would never match its own file, and the
-    // skip would silently never engage for exactly the documents that have
-    // them. saveRoundTrip.test.ts guards this; do not "simplify" it away.
-    if (existing.size !== new TextEncoder().encode(content).byteLength) return false
-    return (await readTextFileWithLimit(existing, 'Existing file')) === content
+    // Cheap reject before reading: a different byte length cannot be the same
+    // bytes. Most real comparisons end here. `content.length` counts UTF-16
+    // code units, not bytes, so it would never match any non-ASCII workspace;
+    // saveRoundTrip.test.ts guards this.
+    const expected = new TextEncoder().encode(content)
+    if (existing.size !== expected.byteLength) return false
+    assertFileSize(existing, 'Existing file')
+    const actual = new Uint8Array(await existing.arrayBuffer())
+    for (let i = 0; i < expected.length; i++) if (actual[i] !== expected[i]) return false
+    return true
   } catch {
     return false
   }
+}
+
+/** Every check-then-write runs through this one queue. A File System Access
+ *  write only lands on close(), so a comparison that overlapped an earlier,
+ *  still-open write would read the bytes that write is about to replace —
+ *  and could skip a save that was needed (autosave overlapping Ctrl+S, or a
+ *  fire-and-forget `!include` write-back overlapping the next save). */
+let writeQueue: Promise<unknown> = Promise.resolve()
+
+/** Write `content` to `handle` unless the file already holds exactly it. */
+export function writeFileIfChanged(handle: FileSystemFileHandle, content: string): Promise<void> {
+  const run = writeQueue.then(async () => {
+    if (await fileAlreadyHas(handle, content)) return
+    const writable = await handle.createWritable()
+    await writable.write(content)
+    await writable.close()
+  })
+  writeQueue = run.catch(() => {})
+  return run
 }
 
 /** Write DSL content to the current file handle (for auto-save) */
@@ -173,10 +197,7 @@ export async function writeToCurrentHandle(content: string): Promise<boolean> {
   if (!currentFileHandle || !hasFileSystemAccess()) return false
   try {
     recordSelfDslWrite(content)
-    if (await fileAlreadyHas(currentFileHandle, content)) return true
-    const writable = await currentFileHandle.createWritable()
-    await writable.write(content)
-    await writable.close()
+    await writeFileIfChanged(currentFileHandle, content)
     return true
   } catch (err) {
     log.error('Failed to write to current file handle', err)
@@ -191,10 +212,7 @@ export async function writeSidecarToHandle(json: string): Promise<boolean> {
     recordSelfSidecarWrite(json)
     // If we have an existing sidecar handle, write to it
     if (currentSidecarHandle) {
-      if (await fileAlreadyHas(currentSidecarHandle, json)) return true
-      const writable = await currentSidecarHandle.createWritable()
-      await writable.write(json)
-      await writable.close()
+      await writeFileIfChanged(currentSidecarHandle, json)
       return true
     }
     // Otherwise try to create one in the same directory as the DSL file
@@ -204,9 +222,7 @@ export async function writeSidecarToHandle(json: string): Promise<boolean> {
         const dslFile = await currentFileHandle.getFile()
         const sidecarFileName = sidecarName(dslFile.name)
         currentSidecarHandle = await dirHandle.getFileHandle(sidecarFileName, { create: true })
-        const writable = await currentSidecarHandle.createWritable()
-        await writable.write(json)
-        await writable.close()
+        await writeFileIfChanged(currentSidecarHandle, json)
         return true
       }
     }
@@ -308,9 +324,7 @@ export async function saveDSLFile(content: string, suggestedName?: string): Prom
         })
       }
       recordSelfDslWrite(content)
-      const writable = await currentFileHandle.createWritable()
-      await writable.write(content)
-      await writable.close()
+      await writeFileIfChanged(currentFileHandle, content)
       return true
     } catch {
       // User cancelled save picker — not an error
@@ -351,9 +365,9 @@ function isBaseElementShape(value: unknown): value is Record<string, unknown> {
   if (!isStringRecord(value.properties)) return false
   if ('description' in value && value.description !== undefined && typeof value.description !== 'string') return false
   if ('url' in value && value.url !== undefined && typeof value.url !== 'string') return false
-  if ('status' in value && value.status !== undefined && !['Live', 'Planned', 'Deprecated', 'Removed'].includes(String(value.status))) return false
+  if ('status' in value && value.status !== undefined && !isElementStatusValue(value.status)) return false
   if ('owner' in value && value.owner !== undefined && typeof value.owner !== 'string') return false
-  return true
+  return isPropertyLayoutShape(value)
 }
 
 function isComponentShape(value: unknown): boolean {
@@ -391,7 +405,7 @@ function isRelationshipShape(value: unknown): boolean {
   if ('url' in value && value.url !== undefined && typeof value.url !== 'string') return false
   if ('interactionStyle' in value && value.interactionStyle !== undefined && !['Synchronous', 'Asynchronous'].includes(String(value.interactionStyle))) return false
   if ('lineStyle' in value && value.lineStyle !== undefined && !['Curved', 'Straight', 'Orthogonal'].includes(String(value.lineStyle))) return false
-  return true
+  return isPropertyLayoutShape(value)
 }
 
 function isViewElementShape(value: unknown): boolean {
@@ -447,15 +461,41 @@ function isRelationshipStyleShape(value: unknown): boolean {
   })
 }
 
+function isPropertyDeclarationsShape(decls: unknown): boolean {
+  return Array.isArray(decls) && decls.every(d =>
+    isRecord(d) && typeof d.key === 'string' && typeof d.value === 'string'
+    && Number.isInteger(d.slot) && Number(d.slot) >= 0
+    && (d.sourcePath === undefined || typeof d.sourcePath === 'string')
+    && (d.sourceLine === undefined || (Number.isInteger(d.sourceLine) && Number(d.sourceLine) > 0))
+    && (d.sourceColumn === undefined || (Number.isInteger(d.sourceColumn) && Number(d.sourceColumn) > 0))
+  )
+}
+
+/** Workspace- or model-level `properties` plus their line provenance. */
+function isScopedPropertiesShape(holder: Record<string, unknown>): boolean {
+  if (holder.properties !== undefined && !isStringRecord(holder.properties)) return false
+  return holder.propertyDeclarations === undefined || isPropertyDeclarationsShape(holder.propertyDeclarations)
+}
+
+/** An element's or relationship's optional PropertyLayout. */
+function isPropertyLayoutShape(value: Record<string, unknown>): boolean {
+  const layout = value.propertyLayout
+  if (layout === undefined) return true
+  return isRecord(layout) && isPropertyDeclarationsShape(layout.declarations)
+    && Array.isArray(layout.directives) && layout.directives.every(d =>
+      isRecord(d) && typeof d.raw === 'string' && (d.sourcePath === undefined || typeof d.sourcePath === 'string'))
+}
+
 /** Runtime schema check for imported workspace JSON. */
 export function isWorkspaceShape(obj: unknown): obj is Workspace {
   if (!isRecord(obj)) return false
   if ('name' in obj && obj.name !== undefined && typeof obj.name !== 'string') return false
   if ('description' in obj && obj.description !== undefined && typeof obj.description !== 'string') return false
+  if (!isScopedPropertiesShape(obj)) return false
   if ('scope' in obj && obj.scope !== undefined && !['softwaresystem', 'landscape', 'none'].includes(String(obj.scope))) return false
 
   if ('directives' in obj && obj.directives !== undefined && (!Array.isArray(obj.directives) || !obj.directives.every(d =>
-    isRecord(d) && typeof d.raw === 'string' && ['workspace', 'model', 'views'].includes(String(d.scope))
+    isRecord(d) && typeof d.raw === 'string' && ['workspace', 'workspaceProperties', 'model', 'modelProperties', 'views'].includes(String(d.scope))
   ))) return false
 
   if ('includedFiles' in obj && obj.includedFiles !== undefined && (!Array.isArray(obj.includedFiles) || !obj.includedFiles.every(f =>
@@ -464,6 +504,7 @@ export function isWorkspaceShape(obj: unknown): obj is Workspace {
 
   const { model, views } = obj
   if (!isRecord(model) || !isRecord(views)) return false
+  if (!isScopedPropertiesShape(model)) return false
   if (!Array.isArray(model.people) || !model.people.every(isPersonShape)) return false
   if (!Array.isArray(model.softwareSystems) || !model.softwareSystems.every(isSoftwareSystemShape)) return false
   if (!Array.isArray(model.relationships) || !model.relationships.every(isRelationshipShape)) return false
@@ -490,7 +531,13 @@ export function isWorkspaceShape(obj: unknown): obj is Workspace {
 
 /** Load workspace from localStorage crash recovery */
 export function loadFromLocalStorage(): Workspace | null {
-  return readJSON<Workspace>('c4hero_crash_recovery', isWorkspaceShape)
+  const workspace = readJSON<Workspace>('c4hero_crash_recovery', isWorkspaceShape)
+  if (workspace) {
+    forEachElementHelper(workspace, (element) => {
+      if (element.status !== undefined) element.status = normalizeElementStatus(element.status)
+    })
+  }
+  return workspace
 }
 
 /** Clear crash recovery data */

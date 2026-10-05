@@ -5,7 +5,7 @@
 import type { Workspace, Model, Group, Person, SoftwareSystem, Container, Component } from '@/types/model'
 import { normalizeElementStatus } from '@/lib/elementStatus'
 import type { ContextAwareParser } from './parser'
-import { nextId, MAX_DEPTH, setUserProperty } from './parser'
+import { nextId, MAX_DEPTH, readPropertyBlock, setUserProperty } from './parser'
 import { parseRelationship } from './parser-relationship'
 import { parseDeploymentEnvironment } from './parser-deployment'
 
@@ -26,6 +26,11 @@ type Element = Person | SoftwareSystem | Container | Component
  */
 function applyStructurizrConventions(element: Element): void {
     if (element.type === 'person' || element.type === 'softwareSystem') {
+        const location = element.properties['c4hero.location']
+        if (element.location === undefined && (location === 'External' || location === 'Internal')) {
+            element.location = location
+            delete element.properties['c4hero.location']
+        }
         const i = element.tags.indexOf('External')
         // Like every hoist below, only fill an unset field: an explicit legacy
         // `location Internal` line wins over an External tag, which is kept in
@@ -160,7 +165,11 @@ export function parseModelBody(
             if (kw === 'properties') {
                 p.advance()
                 p.skipNewlines()
-                p.skipBraceBlock()
+                if (p.match('LBRACE')) {
+                    p.parseScopedProperties(model, 'modelProperties')
+                    p.skipNewlines()
+                    p.expect('RBRACE')
+                }
                 continue
             }
 
@@ -680,32 +689,9 @@ function parseElementPropertyOnElement(p: ContextAwareParser, element: Element, 
 /** Parse a `properties { "key" "value" ... }` block and attach known
  *  keys to the element. Recognizes `c4hero.location` for Person/SoftwareSystem. */
 function parsePropertiesBlock(p: ContextAwareParser, element: Element): void {
-    while (!p.check('RBRACE') && p.peekType() !== 'EOF') {
-        p.skipNewlines()
-        if (p.check('RBRACE') || p.peekType() === 'EOF') break
-        const token = p.peek()
-        if (token.type === 'COMMENT') { p.advance(); continue }
-        if (token.type !== 'STRING' && token.type !== 'IDENTIFIER') { p.advance(); continue }
-        const key = p.advance().value
-        const valTok = p.peek()
-        let val: string | undefined
-        if (valTok.type === 'STRING' || valTok.type === 'IDENTIFIER' || valTok.type === 'NUMBER') {
-            val = p.advance().value
-        }
-        if (val === undefined) continue
-        // Recognized: c4hero.location → element.location for persons/systems.
-        // Hoist only a valid, hoistable value into a still-unset field; any
-        // other combination stays a plain property so no value is silently
-        // lost (same rule as the c4hero.status hoist).
-        if (key === 'c4hero.location'
-            && (element.type === 'person' || element.type === 'softwareSystem')
-            && (val === 'External' || val === 'Internal')
-            && (element as Person | SoftwareSystem).location === undefined) {
-            (element as Person | SoftwareSystem).location = val
-        } else {
-            setUserProperty(element.properties, key, val)
-        }
-    }
+    // Resolve special properties only after every block has supplied its
+    // values, so a root override after an include takes precedence.
+    readPropertyBlock(p, element, (key, val) => setUserProperty(element.properties, key, val))
 }
 
 // Re-export Workspace for type compatibility with parseModelBody calls
